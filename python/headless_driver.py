@@ -309,7 +309,7 @@ if __name__ == "__main__":
         "num_static":     50,      # 50 static beacons
         "num_mobile":     30,      # 30 mobile devices
         "rogue_percent":  10.0,    # 10% of devices trigger rogue events
-        "duration_hours": 100.0,   # 100-hour simulation
+        "duration_hours": 10.0,   # 10-hour simulation
         "width":          500.0,   # 500 x 500 m area
         "height":         500.0,
         "rssi_th":        10.0,
