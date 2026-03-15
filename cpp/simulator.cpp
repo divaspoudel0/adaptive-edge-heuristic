@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
+#include <tuple>
+#include <cstddef>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
