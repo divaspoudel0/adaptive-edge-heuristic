@@ -1,0 +1,7 @@
+*.so
+*.dll
+*.dylib
+*.o
+__pycache__/
+*.pyc
+simulation_results.png
