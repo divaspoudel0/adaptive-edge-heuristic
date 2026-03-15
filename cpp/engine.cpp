@@ -8,6 +8,8 @@ engine_cpp = r'''#include "engine.h"
 #include <sstream>
 #include <algorithm>
 #include <deque>
+#include <cstddef>
+#include <cstdint>
 
 template<typename T> static T clamp11(T v, T lo, T hi) {
     return v < lo ? lo : (v > hi ? hi : v);
