@@ -2,22 +2,6 @@ import os, sys
 
 os.chdir("/content/adaptive-edge-heuristic")
 
-# ── Step 1: Recompile to be safe ──────────────────────────────────────────────
-os.system("rm -f cpp/libheuristic.so")
-ret = os.system(
-    "g++ -O3 -shared -fPIC -std=c++11 "
-    "-o cpp/libheuristic.so "
-    "cpp/engine.cpp cpp/simulator.cpp cpp/learner.cpp "
-    "-Icpp"
-)
-if ret != 0:
-    raise RuntimeError("Compilation failed — check errors above")
-
-so = "/content/adaptive-edge-heuristic/cpp/libheuristic.so"
-assert os.path.exists(so), "Library file still missing after compile"
-print("✅ Library compiled:", so)
-
-# ── Step 2: Overwrite colab_runner.py with absolute path baked in ─────────────
 colab_runner_code = r'''
 import ctypes, csv, json, os, queue, sys, time, threading
 from datetime import datetime
@@ -46,7 +30,6 @@ try:
 except ImportError:
     HAS_SKLEARN = False
 
-# ── Kathmandu Thamel bounds ───────────────────────────────────────────────────
 KTM_LAT_SW = 27.7100; KTM_LON_SW = 85.3070
 KTM_LAT_NE = 27.7155; KTM_LON_NE = 85.3128
 SIM_WIDTH  = 500.0;   SIM_HEIGHT  = 500.0
@@ -71,13 +54,11 @@ def nearest_landmark(x, y):
         if d<bd: bd,best=d,n
     return best
 
-# ── Load library using ABSOLUTE path ─────────────────────────────────────────
 _LIB_PATH = "/content/adaptive-edge-heuristic/cpp/libheuristic.so"
 
 def _load_lib():
     if not os.path.exists(_LIB_PATH):
-        raise RuntimeError(f"Library not found at {_LIB_PATH}\n"
-                           "Run the compile cell first.")
+        raise RuntimeError(f"Library not found at {_LIB_PATH}")
     return ctypes.CDLL(_LIB_PATH)
 
 _lib = _load_lib()
@@ -112,12 +93,11 @@ for _name, _at, _rt in [
     fn.argtypes = _at
     fn.restype  = _rt
 
-# ── Data persistence ──────────────────────────────────────────────────────────
-_BASE      = Path("/content/adaptive-edge-heuristic")
-DATA_DIR   = _BASE / "data"
-ADVERTS_CSV= DATA_DIR / "adverts.csv"
-EVENTS_CSV = DATA_DIR / "events.csv"
-SESSIONS_JS= DATA_DIR / "sessions.json"
+_BASE       = Path("/content/adaptive-edge-heuristic")
+DATA_DIR    = _BASE / "data"
+ADVERTS_CSV = DATA_DIR / "adverts.csv"
+EVENTS_CSV  = DATA_DIR / "events.csv"
+SESSIONS_JS = DATA_DIR / "sessions.json"
 
 ADVERT_FIELDS = ["session_id","timestamp","mac","uid","service_id",
                  "rssi","x","y","lat","lon","landmark",
@@ -145,13 +125,11 @@ def _flush():
                 csv.DictWriter(f,EVENT_FIELDS,extrasaction="ignore").writerows(_ebuf)
             _ebuf=[]
 
-# ── Shared state ──────────────────────────────────────────────────────────────
 class _S:
     lock=threading.Lock(); stats={}; rogue_alerts=[]
     total_adverts=0; running=False; engine=None
 _st=_S()
 
-# ── Callbacks ─────────────────────────────────────────────────────────────────
 @ADVERT_CB
 def _on_advert(ts,mac,uid,svc,rssi,x,y,is_rogue,rtype,lid,anomaly):
     lat,lon=xy_to_latlon(x,y); lm=nearest_landmark(x,y)
@@ -179,7 +157,6 @@ def _on_device(event,device_id,device_type,total):
             "device_id":device_id.decode(),"device_type":device_type.decode(),
             "total_count":total})
 
-# ── Sim thread ────────────────────────────────────────────────────────────────
 _cq=queue.Queue()
 
 def _sim_loop():
@@ -209,7 +186,6 @@ def _apply(action,dev_type,count,extra):
     elif action=="remove":
         _lib.remove_devices(e,count,1 if dev_type==3 else 0)
 
-# ── Plot ──────────────────────────────────────────────────────────────────────
 def _plot(session_id):
     if not ADVERTS_CSV.exists(): print("No data yet."); return None
     with open(ADVERTS_CSV,newline="") as f: rows=list(csv.DictReader(f))
@@ -320,13 +296,12 @@ def _plot(session_id):
     plt.tight_layout(rect=[0,0,1,0.96])
     out=str(_BASE/f"simulation_results_{session_id}.png")
     plt.savefig(out,dpi=150,bbox_inches="tight"); plt.close()
-    print(f"Plot saved → {out}")
+    print(f"Plot saved -> {out}")
     return out
 
-# ── Colab UI ──────────────────────────────────────────────────────────────────
 def _build_ui():
     dd_type=widgets.Dropdown(
-        options=[("1 — Static beacon",1),("2 — Mobile device",2),("3 — Rogue device",3)],
+        options=[("1 - Static beacon",1),("2 - Mobile device",2),("3 - Rogue device",3)],
         description="Type:",layout=widgets.Layout(width="230px"))
     dd_cnt=widgets.Dropdown(options=[1,2,5,10,20],description="Count:",
         layout=widgets.Layout(width="150px"))
@@ -346,10 +321,10 @@ def _build_ui():
 
     def _on_add(_):
         dt=dd_type.value; n=dd_cnt.value; ex=dd_rogue.value if dt==3 else None
-        _cq.put(("add",dt,n,ex)); _log(f"Add {n} × type={dt}" + (f" [{ex}]" if ex else ""))
+        _cq.put(("add",dt,n,ex)); _log(f"Add {n} x type={dt}" + (f" [{ex}]" if ex else ""))
     def _on_rem(_):
         _cq.put(("remove",dd_type.value,dd_cnt.value,None))
-        _log(f"Remove {dd_cnt.value} × type={dd_type.value}")
+        _log(f"Remove {dd_cnt.value} x type={dd_type.value}")
     def _on_stp(_): _st.running=False; _log("Stopping...")
     def _on_st(_):
         with _st.lock: s=dict(_st.stats)
@@ -366,9 +341,9 @@ def _build_ui():
             h=int(elapsed)//3600; m=(int(elapsed)%3600)//60; sec=int(elapsed)%60
             rc=s.get("rogue_count",0)
             rc_col="red" if rc>0 else "green"
-            rc_txt="⚠ ROGUES ACTIVE" if rc>0 else "✓ CLEAN"
+            rc_txt="ROGUES ACTIVE" if rc>0 else "CLEAN"
             html=(f"<div style='font-family:monospace;font-size:13px;line-height:1.8'>"
-                  f"<b>Elapsed:</b> {h:02d}h {m:02d}m {sec:02d}s &nbsp;|&nbsp; "
+                  f"<b>Elapsed:</b> {h:02d}h {m:02d}m {sec:02d}s | "
                   f"<b>Sim time:</b> {int(s.get('time',0))//3600:02d}h "
                   f"{(int(s.get('time',0))%3600)//60:02d}m<br>"
                   f"<b>Devices:</b> Static={s.get('static_count',0)} "
@@ -376,20 +351,20 @@ def _build_ui():
                   f"Rogues=<span style='color:{rc_col}'><b>{rc}</b></span> "
                   f"Total={s.get('device_count',0)} "
                   f"<span style='color:{rc_col}'><b>{rc_txt}</b></span><br>"
-                  f"<b>Adverts:</b> {ta:,} &nbsp;|&nbsp; "
+                  f"<b>Adverts:</b> {ta:,} | "
                   f"<b>Anomaly:</b> {s.get('anomaly_rate',0)*100:.1f}% "
                   f"FP={s.get('fp_rate',0)*100:.1f}% "
                   f"FN={s.get('fn_rate',0)*100:.1f}%<br>"
                   f"<b>Thresholds:</b> RSSI={s.get('rssi_th',0):.2f} "
                   f"Interval={s.get('int_th',0):.3f}</div>")
             if al:
-                html+="<hr>"+"<br>".join(f"<span style='color:red'>⚠ {a}</span>" for a in al[-3:])
+                html+="<hr>"+"<br>".join(f"<span style='color:red'>ALERT: {a}</span>" for a in al[-3:])
             status.value=html
             time.sleep(2.0)
 
     threading.Thread(target=_refresh,daemon=True).start()
     ui=widgets.VBox([
-        widgets.HTML("<h3>🛰 BLE Beacon Monitor — Kathmandu (Thamel)</h3>"),
+        widgets.HTML("<h3>BLE Beacon Monitor - Kathmandu (Thamel)</h3>"),
         status,
         widgets.HBox([dd_type,dd_cnt,dd_rogue]),
         widgets.HBox([btn_add,btn_rem,btn_st,btn_stp]),
@@ -399,7 +374,6 @@ def _build_ui():
     display(ui)
     return _log
 
-# ── Public entry point ────────────────────────────────────────────────────────
 def start(num_static=8, num_mobile=4, rogue_percent=10.0):
     global _sid, _rstart
     DATA_DIR.mkdir(exist_ok=True)
