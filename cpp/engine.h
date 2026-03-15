@@ -32,8 +32,4 @@ void          update_thresholds      (EngineHandle engine, double rssi_th, doubl
 #ifdef __cplusplus
 }
 #endif
-'''
 
-with open("cpp/engine.h", "w") as f:
-    f.write(engine_h)
-print("✅ engine.h written")
