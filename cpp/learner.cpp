@@ -1,7 +1,6 @@
 #include "learner.h"
 #include <cmath>
-#include <cstddef>
-#include <deque>
+#include <algorithm>
 
 template<typename T>
 static T clamp11(T val, T lo, T hi) {
@@ -10,17 +9,21 @@ static T clamp11(T val, T lo, T hi) {
 
 ThresholdLearner::ThresholdLearner(double rssi_th, double int_th, double sim_th)
     : rssi_th_(rssi_th), int_th_(int_th), sim_th_(sim_th),
-      rng_(std::random_device{}())
+      rng_(std::random_device{}()),
+      fp_rate_ema_(0.0), fn_rate_ema_(0.0),
+      last_update_time_(0.0)
 {}
 
 void ThresholdLearner::addObservation(bool true_rogue, bool pred_anomaly,
                                        double rssi, double x, double y, double ts) {
     history_.push_back({true_rogue, pred_anomaly, rssi, x, y, ts});
     if (history_.size() > MAX_HISTORY) history_.pop_front();
+    last_update_time_ = ts;
 }
 
 void ThresholdLearner::update() {
     if (history_.size() < 100) return;
+
     int fp = 0, fn = 0;
     for (const auto& fb : history_) {
         if (!fb.true_rogue &&  fb.pred_anomaly) ++fp;
@@ -30,17 +33,44 @@ void ThresholdLearner::update() {
     double fp_rate = fp / n;
     double fn_rate = fn / n;
 
-    // High FP → make anomaly harder to trigger (raise rssi_th)
-    if      (fp_rate > 0.05) rssi_th_ *= 1.01;
-    else if (fp_rate < 0.01) rssi_th_ *= 0.99;
+    const double alpha = 0.3;
+    fp_rate_ema_ = (fp_rate_ema_ == 0.0) ? fp_rate : alpha * fp_rate + (1 - alpha) * fp_rate_ema_;
+    fn_rate_ema_ = (fn_rate_ema_ == 0.0) ? fn_rate : alpha * fn_rate + (1 - alpha) * fn_rate_ema_;
 
-    // High FN → make anomaly easier to trigger (lower rssi_th)
-    if      (fn_rate > 0.05) rssi_th_ *= 0.99;
-    else if (fn_rate < 0.01) rssi_th_ *= 1.01;
+    double fpe = fp_rate_ema_;
+    double fne = fn_rate_ema_;
+
+    double target_rssi = rssi_th_;
+    double target_int  = int_th_;
+
+    if (fne > 0.02) {
+        target_rssi *= 0.98;
+        target_int  *= 1.03;
+    } else if (fne < 0.005) {
+        target_rssi *= 1.005;
+        target_int  *= 0.997;
+    }
+
+    if (fpe > 0.02) {
+        target_rssi *= 1.01;
+        target_int  *= 0.98;
+    } else if (fpe < 0.005) {
+        target_rssi *= 0.997;
+        target_int  *= 1.005;
+    }
+
+    const double MAX_RSSI_CHANGE = 0.5;
+    const double MAX_INT_CHANGE  = 0.1;
+
+    double new_rssi = clamp11(target_rssi, rssi_th_ - MAX_RSSI_CHANGE, rssi_th_ + MAX_RSSI_CHANGE);
+    double new_int  = clamp11(target_int,  int_th_  - MAX_INT_CHANGE,  int_th_  + MAX_INT_CHANGE);
+
+    rssi_th_ = new_rssi;
+    int_th_  = new_int;
 
     rssi_th_ = clamp11(rssi_th_,  2.0, 20.0);
-    int_th_  = clamp11(int_th_,  0.05,  1.0);
-    sim_th_  = clamp11(sim_th_,  0.50,  0.95);
+    int_th_  = clamp11(int_th_,  0.02, 2.0);
+    sim_th_  = clamp11(sim_th_,  0.50, 0.95);
 }
 
 double ThresholdLearner::recentAnomalyRate() const {
@@ -62,12 +92,4 @@ double ThresholdLearner::recentFNRate() const {
     std::size_t n = 0;
     for (const auto& fb : history_) if (fb.true_rogue && !fb.pred_anomaly) ++n;
     return static_cast<double>(n) / static_cast<double>(history_.size());
-}
-
-double ThresholdLearner::sampleBeta(int a, int b) {
-    std::gamma_distribution<double> ga(static_cast<double>(a), 1.0);
-    std::gamma_distribution<double> gb(static_cast<double>(b), 1.0);
-    double x = ga(rng_), y = gb(rng_);
-    if (x + y == 0.0) return 0.5;
-    return x / (x + y);
 }

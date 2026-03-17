@@ -16,7 +16,7 @@ public:
 
     void addObservation(bool true_rogue, bool pred_anomaly,
                         double rssi, double x, double y, double ts);
-    void update();  // adjust thresholds based on recent FP/FN history
+    void update();
 
     double rssiTh() const { return rssi_th_; }
     double intTh()  const { return int_th_;  }
@@ -37,5 +37,8 @@ private:
     static const std::size_t MAX_HISTORY = 2000;
 
     std::mt19937 rng_;
-    double sampleBeta(int a, int b);
+    double sampleBeta(int a, int b); // not used
+
+    double fp_rate_ema_, fn_rate_ema_;
+    double last_update_time_;
 };
