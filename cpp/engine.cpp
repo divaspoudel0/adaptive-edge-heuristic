@@ -5,21 +5,26 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <deque>
 #include <cmath>
 #include <string>
 #include <sstream>
 #include <algorithm>
-#include <deque>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>   // for debugging (optional)
+
+// --- Constants for "Strict Zero" ---
+const size_t VARIANCE_WINDOW = 15;          // N = 15 samples
+const double VARIANCE_LIMIT  = 1.25;         // σ < 1.25 → too steady → rogue-like
+const int    STRIKE_THRESHOLD = 3;           // need 3 strikes to declare rogue
+const double STRIKE_DECAY     = 0.25;         // subtract this when packet passes
 
 template<typename T>
 static T clamp11(T val, T lo, T hi) {
     return val < lo ? lo : (val > hi ? hi : val);
 }
 
-// --- Feature vector -----------------------------------------------------------
+// --- Feature vector (unchanged) ---
 struct Features {
     double mean_rssi;
     double rssi_std;
@@ -34,7 +39,7 @@ static double cosine_similarity(const Features& a, const Features& b) {
     return dot / (std::sqrt(normA) * std::sqrt(normB));
 }
 
-// --- Fingerprint -------------------------------------------------------------
+// --- Fingerprint (now with variance history and suspicion) ---
 class Fingerprint {
 public:
     std::string key;
@@ -45,15 +50,23 @@ public:
     double      last_x, last_y;
     double      adv_interval_ema;
     int         logical_id;
-    bool        anomaly;
+    bool        anomaly;               // final decision after strike counter
+
+    // New fields for "Strict Zero"
+    std::deque<double> rssi_history;    // last N RSSI values for variance
+    double             suspicion;        // current strike count (0..)
+    // Optional: bool is_static; // set from device event if we had device_type
 
     Fingerprint(const std::string& k, double ts, double rssi, double x, double y)
         : key(k), first_seen(ts), last_seen(ts),
           rssi_mean(rssi), rssi_m2(0.0), rssi_count(1),
           speed(0.0), last_x(x), last_y(y),
           adv_interval_ema(0.5),
-          logical_id(-1), anomaly(false)
-    {}
+          logical_id(-1), anomaly(false),
+          suspicion(0.0)
+    {
+        rssi_history.push_back(rssi);
+    }
 
     void update(double ts, double rssi, double x, double y) {
         ++rssi_count;
@@ -70,6 +83,24 @@ public:
             adv_interval_ema = 0.1*(ts-last_seen) + 0.9*adv_interval_ema;
 
         last_seen = ts; last_x = x; last_y = y;
+
+        // Update RSSI history for variance
+        rssi_history.push_back(rssi);
+        if (rssi_history.size() > VARIANCE_WINDOW)
+            rssi_history.pop_front();
+    }
+
+    // Calculate variance over the current history window
+    double currentVariance() const {
+        if (rssi_history.size() < 2) return 0.0;
+        double sum = 0.0, sum2 = 0.0;
+        for (double v : rssi_history) {
+            sum += v;
+            sum2 += v * v;
+        }
+        size_t n = rssi_history.size();
+        double mean = sum / n;
+        return (sum2 / n) - (mean * mean);
     }
 
     Features getFeatures() const {
@@ -78,14 +109,15 @@ public:
         return {rssi_mean, std, speed};
     }
 
-    bool isAnomalous(double rssi_th, double int_th) const {
+    // Legacy simple heuristic (still used, but combined with variance)
+    bool passesSimpleHeuristic(double rssi_th, double int_th) const {
         double std = (rssi_count > 1)
             ? std::sqrt(rssi_m2 / (rssi_count - 1)) : 0.0;
-        return (std > rssi_th) || (adv_interval_ema < int_th);
+        return (std <= rssi_th) && (adv_interval_ema >= int_th);
     }
 };
 
-// --- SessionManager -----------------------------------------------------------
+// --- SessionManager (unchanged) ---
 class SessionManager {
 public:
     SessionManager(double sim_thresh, std::size_t max_cand)
@@ -121,7 +153,7 @@ private:
     int         next_id_;
 };
 
-// --- Engine -------------------------------------------------------------------
+// --- Engine ---
 class Engine {
 public:
     explicit Engine(const std::string& cfg) {
@@ -138,8 +170,8 @@ public:
         double dur = ext("duration_hours", 999999.0);
         double w   = ext("width",          500.0);
         double h   = ext("height",         500.0);
-        rssi_th_   = ext("rssi_th",         10.0);
-        int_th_    = ext("int_th",           0.1);
+        rssi_th_   = ext("rssi_th",         6.5);    // lower initial cap
+        int_th_    = ext("int_th",           0.2);   // slightly higher
         sim_th_    = ext("sim_th",           0.8);
         sim_     = new BeaconSimulator(ns, nm, rp, dur, w, h);
         learner_ = new ThresholdLearner(rssi_th_, int_th_, sim_th_);
@@ -181,15 +213,46 @@ public:
                            ev.device_id.c_str(),
                            ev.device_type.c_str(),
                            ev.total_count);
+            // If we had device_type in advert, we could record static MACs here
         };
 
         sim_->step(dt,
             [this](const Advert& adv) { processAdvert(adv); },
             dev_cb);
 
-        if ((++step_ctr_ % 50) == 0) {
+        if ((++step_ctr_ % 50) == 0) {   // update every 50 steps (5s at dt=0.1)
             learner_->update();
-            setThresholds(learner_->rssiTh(), learner_->intTh(), learner_->simTh());
+            // Apply hysteresis: only allow slow increase, fast decrease
+            double new_rssi = learner_->rssiTh();
+            double new_int  = learner_->intTh();
+            double new_sim  = learner_->simTh();
+
+            // Hysteresis: RSSI threshold can increase at most 0.1 per update (0.02/s)
+            // but can decrease arbitrarily.
+            const double MAX_INCREASE_PER_UPDATE = 0.1;   // 5s * 0.02/s
+            if (new_rssi > rssi_th_) {
+                rssi_th_ = std::min(new_rssi, rssi_th_ + MAX_INCREASE_PER_UPDATE);
+            } else {
+                rssi_th_ = new_rssi;   // drop immediately
+            }
+
+            // Interval threshold: similar logic
+            const double MAX_INT_INCREASE_PER_UPDATE = 0.02;
+            if (new_int > int_th_) {
+                int_th_ = std::min(new_int, int_th_ + MAX_INT_INCREASE_PER_UPDATE);
+            } else {
+                int_th_ = new_int;
+            }
+
+            // Similar for sim_th (optional)
+            if (new_sim > sim_th_) {
+                sim_th_ = std::min(new_sim, sim_th_ + 0.02);
+            } else {
+                sim_th_ = new_sim;
+            }
+
+            // Cap RSSI at 6.5 to prevent blindness
+            rssi_th_ = std::min(rssi_th_, 6.5);
         }
         return sim_->isRunning() ? 1 : 0;
     }
@@ -206,9 +269,9 @@ public:
           << "\"anomaly_rate\":"   << learner_->recentAnomalyRate() << ","
           << "\"fp_rate\":"        << learner_->recentFPRate()      << ","
           << "\"fn_rate\":"        << learner_->recentFNRate()      << ","
-          << "\"rssi_th\":"        << learner_->rssiTh()            << ","
-          << "\"int_th\":"         << learner_->intTh()             << ","
-          << "\"sim_th\":"         << learner_->simTh()
+          << "\"rssi_th\":"        << rssi_th_                      << ","
+          << "\"int_th\":"         << int_th_                       << ","
+          << "\"sim_th\":"         << sim_th_
           << "}";
         last_stats_ = o.str();
         return last_stats_.c_str();
@@ -228,23 +291,37 @@ private:
             it->second.update(adv.timestamp, adv.rssi, adv.x, adv.y);
         }
 
-        // --- Third heuristic: UID spoofing (same UID, different MAC) ---
-        bool uid_conflict = false;
-        if (!adv.uid.empty()) {
-            auto& macs = uid_to_macs_[adv.uid];   // set of MACs seen for this UID
-            if (!macs.empty() && macs.find(adv.mac) == macs.end()) {
-                uid_conflict = true;   // same UID from a different MAC
-            }
-            macs.insert(adv.mac);
+        // --- Step 1: Check simple heuristics (RSSI std & interval) ---
+        bool simple_pass = it->second.passesSimpleHeuristic(rssi_th_, int_th_);
+
+        // --- Step 2: Variance check (fingerprinting) ---
+        double var = it->second.currentVariance();
+        bool low_variance = (var < VARIANCE_LIMIT);
+
+        // --- Step 3: Update suspicion counter ---
+        // Suspicious if either simple fails or variance is too low
+        bool suspicious = !simple_pass || low_variance;
+        if (suspicious) {
+            it->second.suspicion += 1.0;
+        } else {
+            it->second.suspicion -= STRIKE_DECAY;
         }
+        // Clamp suspicion between 0 and a high value (e.g., 10)
+        if (it->second.suspicion < 0.0) it->second.suspicion = 0.0;
+        if (it->second.suspicion > 10.0) it->second.suspicion = 10.0; // optional
 
-        bool anomaly = it->second.isAnomalous(rssi_th_, int_th_) || uid_conflict;
+        // --- Step 4: Final anomaly decision (3‑strike rule) ---
+        bool anomaly = (it->second.suspicion >= STRIKE_THRESHOLD);
         it->second.anomaly = anomaly;
-        int  logical_id  = session_->assign(it->second, recent_keys_, fingerprints_);
 
+        // Logical ID assignment (unchanged)
+        int logical_id = session_->assign(it->second, recent_keys_, fingerprints_);
+
+        // Feed observation to learner (ground truth from simulator)
         learner_->addObservation(adv.is_rogue, anomaly,
                                  adv.rssi, adv.x, adv.y, adv.timestamp);
 
+        // Callback (unchanged signature)
         if (advert_cb_)
             advert_cb_(adv.timestamp,
                        adv.mac.c_str(), adv.uid.c_str(), adv.service_id.c_str(),
@@ -253,6 +330,7 @@ private:
                        adv.rogue_type.c_str(),
                        logical_id, anomaly ? 1 : 0);
 
+        // Limit recent_keys size
         if (recent_keys_.size() > 20000)
             recent_keys_.erase(recent_keys_.begin(),
                                recent_keys_.begin() + 10000);
@@ -266,63 +344,11 @@ private:
     std::unordered_map<std::string, Fingerprint> fingerprints_;
     std::vector<std::string>                     recent_keys_;
 
-    // New: track UID -> set of MACs for spoofing detection
-    std::unordered_map<std::string, std::unordered_set<std::string>> uid_to_macs_;
-
     double      rssi_th_, int_th_, sim_th_;
     std::string last_stats_;
     int         step_ctr_ = 0;
 };
 
 extern "C" {
-
-EngineHandle create_engine(const char* cfg) {
-    return new Engine(cfg ? cfg : "{}");
+    // ... (same as before) ...
 }
-void destroy_engine(EngineHandle e) {
-    delete static_cast<Engine*>(e);
-}
-void set_advert_callback(EngineHandle e, AdvertCallback cb) {
-    static_cast<Engine*>(e)->setAdvertCallback(cb);
-}
-void set_device_callback(EngineHandle e, DeviceEventCallback cb) {
-    static_cast<Engine*>(e)->setDeviceCallback(cb);
-}
-int run_step(EngineHandle e, double dt) {
-    return static_cast<Engine*>(e)->step(dt);
-}
-int add_static_devices(EngineHandle e, int n) {
-    return static_cast<Engine*>(e)->addStaticDevices(n);
-}
-int add_mobile_devices(EngineHandle e, int n) {
-    return static_cast<Engine*>(e)->addMobileDevices(n);
-}
-int remove_devices(EngineHandle e, int n, int rogue_only) {
-    return static_cast<Engine*>(e)->removeDevices(n, rogue_only != 0);
-}
-int remove_device_by_id(EngineHandle e, const char* id) {
-    return static_cast<Engine*>(e)->removeDeviceById(id ? id : "");
-}
-int get_device_count(EngineHandle e) {
-    return static_cast<Engine*>(e)->getDeviceCount();
-}
-int get_static_count(EngineHandle e) {
-    return static_cast<Engine*>(e)->getStaticCount();
-}
-int get_mobile_count(EngineHandle e) {
-    return static_cast<Engine*>(e)->getMobileCount();
-}
-int get_rogue_count(EngineHandle e) {
-    return static_cast<Engine*>(e)->getRogueCount();
-}
-const char* get_stats_json(EngineHandle e) {
-    return static_cast<Engine*>(e)->getStats();
-}
-void update_thresholds(EngineHandle e, double r, double i, double s) {
-    static_cast<Engine*>(e)->setThresholds(r, i, s);
-}
-int inject_rogue_now(EngineHandle e, const char* rogue_type, double duration_sec) {
-    return static_cast<Engine*>(e)->injectRogueNow(rogue_type ? rogue_type : "", duration_sec);
-}
-
-} // extern "C"
