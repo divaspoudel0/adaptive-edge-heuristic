@@ -37,7 +37,9 @@ private:
     static const std::size_t MAX_HISTORY = 2000;
 
     std::mt19937 rng_;
-    double sampleBeta(int a, int b);
+    double sampleBeta(int a, int b); // not used, kept for compatibility
+
+    // New EMA fields
     double fp_rate_ema_, fn_rate_ema_;
     double last_update_time_;
 };
