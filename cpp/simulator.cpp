@@ -142,7 +142,7 @@ BeaconSimulator::BeaconSimulator(int    num_static,
     double t_lo        = total_duration_ * 0.05;
     double t_hi        = total_duration_ * 0.95;
     std::uniform_real_distribution<double> t_dist(t_lo, t_hi);
-    static const std::string types[] = {"spoof_uid", "erratic_timing", "replay"};
+    static const std::string types[] = {"erratic_timing", "erratic_timing", "erratic_timing"};
     std::uniform_int_distribution<int> type_pick(0, 2);
     for (int i = 0; i < num_rogues; ++i)
         rogue_schedule_.emplace_back(t_dist(rng_), 300.0, types[type_pick(rng_)]);
