@@ -38,4 +38,6 @@ private:
 
     std::mt19937 rng_;
     double sampleBeta(int a, int b);
+    double fp_rate_ema_, fn_rate_ema_;
+    double last_update_time_;
 };
