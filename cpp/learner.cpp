@@ -1,7 +1,6 @@
 #include "learner.h"
 #include <cmath>
-#include <cstddef>
-#include <deque>
+#include <algorithm>
 
 template<typename T>
 static T clamp11(T val, T lo, T hi) {
@@ -30,16 +29,25 @@ void ThresholdLearner::update() {
     double fp_rate = fp / n;
     double fn_rate = fn / n;
 
-    // High FP → make anomaly harder to trigger (raise rssi_th)
-    if      (fp_rate > 0.05) rssi_th_ *= 1.01;
-    else if (fp_rate < 0.01) rssi_th_ *= 0.99;
+    // --- Adjust rssi_th ---
+    // High FP → raise rssi_th (make anomaly harder)
+    // High FN → lower rssi_th (make anomaly easier)
+    if      (fp_rate > 0.02) rssi_th_ *= 1.02;  // more aggressive than before
+    else if (fp_rate < 0.005) rssi_th_ *= 0.99;
+    if      (fn_rate > 0.02) rssi_th_ *= 0.98;  // stronger reduction when many misses
+    else if (fn_rate < 0.005) rssi_th_ *= 1.01;
 
-    // High FN → make anomaly easier to trigger (lower rssi_th)
-    if      (fn_rate > 0.05) rssi_th_ *= 0.99;
-    else if (fn_rate < 0.01) rssi_th_ *= 1.01;
+    // --- Adjust int_th ---
+    // High FP → lower int_th (make anomaly harder via interval)
+    // High FN → raise int_th (make anomaly easier via interval)
+    if      (fp_rate > 0.02) int_th_ *= 0.98;
+    else if (fp_rate < 0.005) int_th_ *= 1.01;
+    if      (fn_rate > 0.02) int_th_ *= 1.02;  // raise to catch erratic rogues
+    else if (fn_rate < 0.005) int_th_ *= 0.99;
 
+    // Clamp to reasonable ranges
     rssi_th_ = clamp11(rssi_th_,  2.0, 20.0);
-    int_th_  = clamp11(int_th_,  0.05,  1.0);
+    int_th_  = clamp11(int_th_,  0.02,  1.5);  // wider range for sensitivity
     sim_th_  = clamp11(sim_th_,  0.50,  0.95);
 }
 
@@ -62,12 +70,4 @@ double ThresholdLearner::recentFNRate() const {
     std::size_t n = 0;
     for (const auto& fb : history_) if (fb.true_rogue && !fb.pred_anomaly) ++n;
     return static_cast<double>(n) / static_cast<double>(history_.size());
-}
-
-double ThresholdLearner::sampleBeta(int a, int b) {
-    std::gamma_distribution<double> ga(static_cast<double>(a), 1.0);
-    std::gamma_distribution<double> gb(static_cast<double>(b), 1.0);
-    double x = ga(rng_), y = gb(rng_);
-    if (x + y == 0.0) return 0.5;
-    return x / (x + y);
 }
