@@ -2,7 +2,7 @@ CXX      := g++
 CXXFLAGS := -O3 -std=c++11 -Wall -Wextra -fPIC -Icpp
 SRCS     := cpp/engine.cpp cpp/simulator.cpp cpp/learner.cpp
 
-.PHONY: all clean run plot
+.PHONY: all clean run
 
 all: cpp/libheuristic.so
 
@@ -10,14 +10,12 @@ cpp/libheuristic.so: $(SRCS)
 	$(CXX) $(CXXFLAGS) -shared -o $@ $^
 	@echo "Built $@"
 
-macos: $(SRCS)
-	$(CXX) $(CXXFLAGS) -dynamiclib -o cpp/libheuristic.dylib $^
+macos:
+	$(CXX) $(CXXFLAGS) -dynamiclib -o cpp/libheuristic.dylib $(SRCS)
+	@echo "Built cpp/libheuristic.dylib"
 
 clean:
 	rm -f cpp/libheuristic.so cpp/libheuristic.dylib cpp/heuristic.dll
 
 run: cpp/libheuristic.so
-	python python/run.py
-
-plot:
-	python python/plot.py
+	python python/headless_driver.py
