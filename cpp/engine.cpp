@@ -194,10 +194,9 @@ private:
 
         // 3. Compute current variance (requires at least 2 samples)
         double var = it->second.variance();
-        bool   low_variance = (var < 1.0 && it->second.count >= 2);
-
+		bool low_variance = (var < 1.6 && it->second.count >= 2);
         // 4. Check RSSI threshold
-        bool high_rssi = (adv.rssi > rssi_th_);
+		bool high_rssi = (std::abs(adv.rssi) < rssi_th_);
 
         // 5. Update strike counter
         if (low_variance && high_rssi) {
@@ -229,28 +228,23 @@ private:
     }
 
     void updateThresholds(double elapsed) {
-        // Count how many devices are currently flagged as rogue (anomaly)
-        int rogue_flagged = 0;
-        for (const auto& kv : trackers_) {
-            if (kv.second.strikes >= 5.0) ++rogue_flagged;
-        }
-
-        // Adjust RSSI threshold with hysteresis
-        double old_rssi_th = rssi_th_;
-
-        // If we have rogue devices, we can lower threshold instantly (increase sensitivity)
-        if (rogue_flagged > 0) {
-            rssi_th_ = std::max(2.0, rssi_th_ - 0.5);  // aggressive drop
-        } else {
-            // No rogues: slowly increase threshold, but capped at 7.5 and limited slew rate
-            double max_increase = 0.01 * elapsed;   // 0.01 dB per second
-            rssi_th_ = std::min(7.5, rssi_th_ + max_increase);
-        }
-
-        // Ensure lower bound
-        rssi_th_ = std::max(2.0, rssi_th_);
+    int rogue_flagged = 0;
+    for (const auto& kv : trackers_) {
+        if (kv.second.strikes >= 5.0) ++rogue_flagged;
     }
-
+    
+    if (rogue_flagged > 0) {
+        // When rogue detected, become more sensitive (lower threshold)
+        rssi_th_ = std::max(4.5, rssi_th_ - 0.5);  // Floor at 4.5
+    } else {
+        // No rogues: slowly increase threshold based on device count
+        double device_factor = std::min(1.0, trackers_.size() / 20.0);
+        double max_increase = 0.01 * elapsed * device_factor;
+        rssi_th_ = std::min(7.5, rssi_th_ + max_increase);
+    }
+    
+    rssi_th_ = std::max(4.5, std::min(7.5, rssi_th_));  // Clamp between 4.5-7.5
+}
     double computeAnomalyRate() const {
         if (trackers_.empty()) return 0.0;
         size_t n = 0;
