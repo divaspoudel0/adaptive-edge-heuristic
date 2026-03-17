@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <deque>
 #include <set>
+#include <cstddef>
 
 // -----------------------------------------------------------------------------
 // DeviceTracker – per source (mac:uid:service) running variance & strikes
@@ -46,8 +47,7 @@ public:
                std::unordered_map<std::string, int>& assigned) {
         auto it = assigned.find(key);
         if (it != assigned.end()) return it->second;
-        // ... (cosine similarity logic from original, omitted for brevity) ...
-        // We'll keep a simple incremental ID assignment for simplicity.
+        // Simple incremental ID assignment (cosine similarity omitted for brevity)
         assigned[key] = next_id_++;
         return assigned[key];
     }
@@ -88,8 +88,7 @@ public:
         sim_     = new BeaconSimulator(ns, nm, rp, dur, w, h);
         session_ = new SessionManager(sim_th_, 1000);
 
-        // Whitelist – could be read from config; here we hardcode eight static MACs
-        // (In a real system these would be the MACs of your fixed beacons)
+        // Whitelist – hardcode eight static MACs (example values)
         whitelist_ = {
             "02:12:34:56:78:90",
             "02:23:45:67:89:01",
@@ -277,9 +276,73 @@ private:
     int         step_ctr_ = 0;
 };
 
-// C API – unchanged (same as before)
+// -----------------------------------------------------------------------------
+// C API – all functions declared in engine.h
+// -----------------------------------------------------------------------------
 extern "C" {
-    EngineHandle create_engine(const char* cfg) { return new Engine(cfg ? cfg : "{}"); }
-    void destroy_engine(EngineHandle e) { delete static_cast<Engine*>(e); }
-    // ... all other functions identical to previous version ...
+
+EngineHandle create_engine(const char* cfg) {
+    return new Engine(cfg ? cfg : "{}");
 }
+
+void destroy_engine(EngineHandle e) {
+    delete static_cast<Engine*>(e);
+}
+
+void set_advert_callback(EngineHandle e, AdvertCallback cb) {
+    static_cast<Engine*>(e)->setAdvertCallback(cb);
+}
+
+void set_device_callback(EngineHandle e, DeviceEventCallback cb) {
+    static_cast<Engine*>(e)->setDeviceCallback(cb);
+}
+
+int run_step(EngineHandle e, double dt) {
+    return static_cast<Engine*>(e)->step(dt);
+}
+
+int add_static_devices(EngineHandle e, int count) {
+    return static_cast<Engine*>(e)->addStaticDevices(count);
+}
+
+int add_mobile_devices(EngineHandle e, int count) {
+    return static_cast<Engine*>(e)->addMobileDevices(count);
+}
+
+int remove_devices(EngineHandle e, int count, int rogue_only) {
+    return static_cast<Engine*>(e)->removeDevices(count, rogue_only != 0);
+}
+
+int remove_device_by_id(EngineHandle e, const char* id) {
+    return static_cast<Engine*>(e)->removeDeviceById(id ? id : "");
+}
+
+int inject_rogue_now(EngineHandle e, const char* rogue_type, double duration_sec) {
+    return static_cast<Engine*>(e)->injectRogueNow(rogue_type ? rogue_type : "", duration_sec);
+}
+
+int get_device_count(EngineHandle e) {
+    return static_cast<Engine*>(e)->getDeviceCount();
+}
+
+int get_static_count(EngineHandle e) {
+    return static_cast<Engine*>(e)->getStaticCount();
+}
+
+int get_mobile_count(EngineHandle e) {
+    return static_cast<Engine*>(e)->getMobileCount();
+}
+
+int get_rogue_count(EngineHandle e) {
+    return static_cast<Engine*>(e)->getRogueCount();
+}
+
+const char* get_stats_json(EngineHandle e) {
+    return static_cast<Engine*>(e)->getStats();
+}
+
+void update_thresholds(EngineHandle e, double r, double i, double s) {
+    static_cast<Engine*>(e)->setThresholds(r, i, s);
+}
+
+} // extern "C"
