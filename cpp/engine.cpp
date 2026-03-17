@@ -13,11 +13,11 @@
 #include <cstddef>
 #include <cstdint>
 
-// --- Constants for "Strict Zero" ---
+// --- Constants for Strict Zero ---
 const size_t VARIANCE_WINDOW = 15;          // N = 15 samples
 const double VARIANCE_LIMIT  = 1.25;         // σ < 1.25 → too steady → rogue-like
 const int    STRIKE_THRESHOLD = 3;           // need 3 strikes to declare rogue
-const double STRIKE_DECAY     = 0.25;         // subtract this when packet passes
+const double STRIKE_DECAY     = 0.25;        // subtract this when packet passes
 
 template<typename T>
 static T clamp11(T val, T lo, T hi) {
@@ -39,7 +39,7 @@ static double cosine_similarity(const Features& a, const Features& b) {
     return dot / (std::sqrt(normA) * std::sqrt(normB));
 }
 
-// --- Fingerprint (now with variance history and suspicion) ---
+// --- Fingerprint with variance history and suspicion ---
 class Fingerprint {
 public:
     std::string key;
@@ -52,10 +52,8 @@ public:
     int         logical_id;
     bool        anomaly;               // final decision after strike counter
 
-    // New fields for "Strict Zero"
     std::deque<double> rssi_history;    // last N RSSI values for variance
-    double             suspicion;        // current strike count (0..)
-    // Optional: bool is_static; // set from device event if we had device_type
+    double             suspicion;        // current strike count
 
     Fingerprint(const std::string& k, double ts, double rssi, double x, double y)
         : key(k), first_seen(ts), last_seen(ts),
@@ -84,7 +82,6 @@ public:
 
         last_seen = ts; last_x = x; last_y = y;
 
-        // Update RSSI history for variance
         rssi_history.push_back(rssi);
         if (rssi_history.size() > VARIANCE_WINDOW)
             rssi_history.pop_front();
@@ -109,7 +106,7 @@ public:
         return {rssi_mean, std, speed};
     }
 
-    // Legacy simple heuristic (still used, but combined with variance)
+    // Legacy simple heuristic (still used, combined with variance)
     bool passesSimpleHeuristic(double rssi_th, double int_th) const {
         double std = (rssi_count > 1)
             ? std::sqrt(rssi_m2 / (rssi_count - 1)) : 0.0;
@@ -153,7 +150,7 @@ private:
     int         next_id_;
 };
 
-// --- Engine ---
+// --- Engine -------------------------------------------------------------------
 class Engine {
 public:
     explicit Engine(const std::string& cfg) {
@@ -170,7 +167,7 @@ public:
         double dur = ext("duration_hours", 999999.0);
         double w   = ext("width",          500.0);
         double h   = ext("height",         500.0);
-        rssi_th_   = ext("rssi_th",         6.5);    // lower initial cap
+        rssi_th_   = ext("rssi_th",         6.5);    // initial cap
         int_th_    = ext("int_th",           0.2);   // slightly higher
         sim_th_    = ext("sim_th",           0.8);
         sim_     = new BeaconSimulator(ns, nm, rp, dur, w, h);
@@ -213,45 +210,40 @@ public:
                            ev.device_id.c_str(),
                            ev.device_type.c_str(),
                            ev.total_count);
-            // If we had device_type in advert, we could record static MACs here
         };
 
         sim_->step(dt,
             [this](const Advert& adv) { processAdvert(adv); },
             dev_cb);
 
-        if ((++step_ctr_ % 50) == 0) {   // update every 50 steps (5s at dt=0.1)
+        if ((++step_ctr_ % 50) == 0) {   // update every 5 seconds (dt=0.1)
             learner_->update();
-            // Apply hysteresis: only allow slow increase, fast decrease
             double new_rssi = learner_->rssiTh();
             double new_int  = learner_->intTh();
             double new_sim  = learner_->simTh();
 
-            // Hysteresis: RSSI threshold can increase at most 0.1 per update (0.02/s)
-            // but can decrease arbitrarily.
-            const double MAX_INCREASE_PER_UPDATE = 0.1;   // 5s * 0.02/s
+            // Hysteresis: slow increase, fast decrease
+            const double MAX_RSSI_INCREASE = 0.1;   // per 5s update
             if (new_rssi > rssi_th_) {
-                rssi_th_ = std::min(new_rssi, rssi_th_ + MAX_INCREASE_PER_UPDATE);
+                rssi_th_ = std::min(new_rssi, rssi_th_ + MAX_RSSI_INCREASE);
             } else {
-                rssi_th_ = new_rssi;   // drop immediately
+                rssi_th_ = new_rssi;
             }
 
-            // Interval threshold: similar logic
-            const double MAX_INT_INCREASE_PER_UPDATE = 0.02;
+            const double MAX_INT_INCREASE = 0.02;
             if (new_int > int_th_) {
-                int_th_ = std::min(new_int, int_th_ + MAX_INT_INCREASE_PER_UPDATE);
+                int_th_ = std::min(new_int, int_th_ + MAX_INT_INCREASE);
             } else {
                 int_th_ = new_int;
             }
 
-            // Similar for sim_th (optional)
             if (new_sim > sim_th_) {
                 sim_th_ = std::min(new_sim, sim_th_ + 0.02);
             } else {
                 sim_th_ = new_sim;
             }
 
-            // Cap RSSI at 6.5 to prevent blindness
+            // Hard cap on RSSI threshold to prevent blindness
             rssi_th_ = std::min(rssi_th_, 6.5);
         }
         return sim_->isRunning() ? 1 : 0;
@@ -279,6 +271,35 @@ public:
 
 private:
     void processAdvert(const Advert& adv) {
+        // --- Whitelist: static devices are never anomalous ---
+        if (adv.device_type == "static") {
+            whitelist_macs_.insert(adv.mac);
+        }
+        // If MAC is whitelisted, bypass all checks
+        if (whitelist_macs_.find(adv.mac) != whitelist_macs_.end()) {
+            // Still need to update fingerprint for logical ID? Probably not needed.
+            // But we still need to assign logical ID and call callback.
+            // Let's create a temporary fingerprint or just use key for session.
+            std::string key = adv.mac + ":" + adv.uid + ":" + adv.service_id;
+            auto it = fingerprints_.find(key);
+            if (it == fingerprints_.end()) {
+                fingerprints_.emplace(key,
+                    Fingerprint(key, adv.timestamp, adv.rssi, adv.x, adv.y));
+                it = fingerprints_.find(key);
+                recent_keys_.push_back(key);
+            } else {
+                it->second.update(adv.timestamp, adv.rssi, adv.x, adv.y);
+            }
+            int logical_id = session_->assign(it->second, recent_keys_, fingerprints_);
+            if (advert_cb_)
+                advert_cb_(adv.timestamp,
+                           adv.mac.c_str(), adv.uid.c_str(), adv.service_id.c_str(),
+                           adv.rssi, adv.x, adv.y,
+                           0, "", logical_id, 0);  // anomaly forced to 0
+            return;
+        }
+
+        // --- Normal processing for non‑whitelisted devices ---
         std::string key = adv.mac + ":" + adv.uid + ":" + adv.service_id;
 
         auto it = fingerprints_.find(key);
@@ -321,7 +342,7 @@ private:
         learner_->addObservation(adv.is_rogue, anomaly,
                                  adv.rssi, adv.x, adv.y, adv.timestamp);
 
-        // Callback (unchanged signature)
+        // Callback
         if (advert_cb_)
             advert_cb_(adv.timestamp,
                        adv.mac.c_str(), adv.uid.c_str(), adv.service_id.c_str(),
@@ -343,6 +364,7 @@ private:
     DeviceEventCallback                          device_cb_ = nullptr;
     std::unordered_map<std::string, Fingerprint> fingerprints_;
     std::vector<std::string>                     recent_keys_;
+    std::unordered_set<std::string>              whitelist_macs_;   // MACs of static devices
 
     double      rssi_th_, int_th_, sim_th_;
     std::string last_stats_;
@@ -350,5 +372,54 @@ private:
 };
 
 extern "C" {
-    // ... (same as before) ...
+
+EngineHandle create_engine(const char* cfg) {
+    return new Engine(cfg ? cfg : "{}");
 }
+void destroy_engine(EngineHandle e) {
+    delete static_cast<Engine*>(e);
+}
+void set_advert_callback(EngineHandle e, AdvertCallback cb) {
+    static_cast<Engine*>(e)->setAdvertCallback(cb);
+}
+void set_device_callback(EngineHandle e, DeviceEventCallback cb) {
+    static_cast<Engine*>(e)->setDeviceCallback(cb);
+}
+int run_step(EngineHandle e, double dt) {
+    return static_cast<Engine*>(e)->step(dt);
+}
+int add_static_devices(EngineHandle e, int n) {
+    return static_cast<Engine*>(e)->addStaticDevices(n);
+}
+int add_mobile_devices(EngineHandle e, int n) {
+    return static_cast<Engine*>(e)->addMobileDevices(n);
+}
+int remove_devices(EngineHandle e, int n, int rogue_only) {
+    return static_cast<Engine*>(e)->removeDevices(n, rogue_only != 0);
+}
+int remove_device_by_id(EngineHandle e, const char* id) {
+    return static_cast<Engine*>(e)->removeDeviceById(id ? id : "");
+}
+int get_device_count(EngineHandle e) {
+    return static_cast<Engine*>(e)->getDeviceCount();
+}
+int get_static_count(EngineHandle e) {
+    return static_cast<Engine*>(e)->getStaticCount();
+}
+int get_mobile_count(EngineHandle e) {
+    return static_cast<Engine*>(e)->getMobileCount();
+}
+int get_rogue_count(EngineHandle e) {
+    return static_cast<Engine*>(e)->getRogueCount();
+}
+const char* get_stats_json(EngineHandle e) {
+    return static_cast<Engine*>(e)->getStats();
+}
+void update_thresholds(EngineHandle e, double r, double i, double s) {
+    static_cast<Engine*>(e)->setThresholds(r, i, s);
+}
+int inject_rogue_now(EngineHandle e, const char* rogue_type, double duration_sec) {
+    return static_cast<Engine*>(e)->injectRogueNow(rogue_type ? rogue_type : "", duration_sec);
+}
+
+} // extern "C"
