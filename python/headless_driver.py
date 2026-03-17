@@ -406,7 +406,7 @@ if __name__ == "__main__":
         "duration_hours": 0.5,   # 1800 sim-seconds
         "width":         100.0,
         "height":        100.0,
-        "rssi_th":        10.0,
+        "rssi_th":        5.0,
         "int_th":          0.2,
         "sim_th":          0.8,
     }
