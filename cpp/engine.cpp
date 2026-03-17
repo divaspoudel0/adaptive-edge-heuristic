@@ -3,6 +3,7 @@
 #include "learner.h"
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <cmath>
 #include <string>
@@ -11,7 +12,7 @@
 #include <deque>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
+#include <cstdio>   // for debugging (optional)
 
 template<typename T>
 static T clamp11(T val, T lo, T hi) {
@@ -227,19 +228,22 @@ private:
             it->second.update(adv.timestamp, adv.rssi, adv.x, adv.y);
         }
 
-        bool anomaly     = it->second.isAnomalous(rssi_th_, int_th_);
+        // --- Third heuristic: UID spoofing (same UID, different MAC) ---
+        bool uid_conflict = false;
+        if (!adv.uid.empty()) {
+            auto& macs = uid_to_macs_[adv.uid];   // set of MACs seen for this UID
+            if (!macs.empty() && macs.find(adv.mac) == macs.end()) {
+                uid_conflict = true;   // same UID from a different MAC
+            }
+            macs.insert(adv.mac);
+        }
+
+        bool anomaly = it->second.isAnomalous(rssi_th_, int_th_) || uid_conflict;
         it->second.anomaly = anomaly;
         int  logical_id  = session_->assign(it->second, recent_keys_, fingerprints_);
 
         learner_->addObservation(adv.is_rogue, anomaly,
                                  adv.rssi, adv.x, adv.y, adv.timestamp);
-        if (adv.is_rogue) {
-    printf("Rogue %s: rssi_std=%.2f, adv_interval=%.3f, anomaly=%d\n",
-           adv.rogue_type.c_str(),
-           it->second.getFeatures().rssi_std,
-           it->second.adv_interval_ema,
-           anomaly);
-}
 
         if (advert_cb_)
             advert_cb_(adv.timestamp,
@@ -261,6 +265,9 @@ private:
     DeviceEventCallback                          device_cb_ = nullptr;
     std::unordered_map<std::string, Fingerprint> fingerprints_;
     std::vector<std::string>                     recent_keys_;
+
+    // New: track UID -> set of MACs for spoofing detection
+    std::unordered_map<std::string, std::unordered_set<std::string>> uid_to_macs_;
 
     double      rssi_th_, int_th_, sim_th_;
     std::string last_stats_;
