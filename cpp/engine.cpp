@@ -187,7 +187,7 @@ public:
             [this](const Advert& adv) { processAdvert(adv); },
             dev_cb);
 
-        if ((++step_ctr_ % 100) == 0) {
+        if ((++step_ctr_ % 50) == 0) {
             learner_->update();
             setThresholds(learner_->rssiTh(), learner_->intTh(), learner_->simTh());
         }
