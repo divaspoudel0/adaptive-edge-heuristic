@@ -10,19 +10,16 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// ─── C++11 compatible clamp ───────────────────────────────────────────────────
 template<typename T>
 static T clamp11(T val, T lo, T hi) {
     return val < lo ? lo : (val > hi ? hi : val);
 }
 
-// ─── RSSI path-loss model ─────────────────────────────────────────────────────
 static double rssi_from_distance(double d, double P0 = -59.0, double n = 2.0) {
     if (d < 0.01) d = 0.01;
     return P0 - 10.0 * n * std::log10(d);
 }
 
-// ─── Random identifier helpers ────────────────────────────────────────────────
 static std::string random_mac(std::mt19937& rng) {
     std::uniform_int_distribution<int> dist(0, 255);
     std::ostringstream ss;
@@ -44,7 +41,6 @@ static std::string random_uid(std::mt19937& rng) {
     return ss.str();
 }
 
-// ─── Device implementation ────────────────────────────────────────────────────
 Device::Device(const std::string& id,
                const std::string& svc,
                bool rogue,
@@ -59,16 +55,15 @@ Device::Device(const std::string& id,
       mac_rotation_interval(mac_int),
       uid_rotation_interval(uid_int),
       advertisement_interval(adv_int),
-      last_advertisement(-adv_int),   // fire on first step
+      last_advertisement(-adv_int),
       next_mac_rotation(mac_int),
       next_uid_rotation(uid_int),
-      end_time(1e18),                 // permanent by default
+      end_time(1e18),
       mac(""), uid(""),
       is_mobile(mobile)
 {}
 
 void Device::updatePosition(double dt, double width, double height, std::mt19937& rng) {
-    // ~1% chance per second to change direction
     std::uniform_real_distribution<double> prob(0.0, 1.0);
     if (prob(rng) < 0.01 * dt) {
         std::uniform_real_distribution<double> angle_d(0.0, 2.0 * M_PI);
@@ -80,7 +75,6 @@ void Device::updatePosition(double dt, double width, double height, std::mt19937
     }
     x += vx * dt;
     y += vy * dt;
-    // Elastic bounce off walls
     if (x < 0.0)    { vx =  std::abs(vx); x = 0.0;    }
     if (x > width)  { vx = -std::abs(vx); x = width;  }
     if (y < 0.0)    { vy =  std::abs(vy); y = 0.0;    }
@@ -111,6 +105,13 @@ Advert Device::generateAdvert(double current_time, double rx, double ry) const {
     adv.y          = y;
     adv.is_rogue   = is_rogue;
     adv.rogue_type = is_rogue ? rogue_type : "";
+    // Set device_type
+    if (is_rogue)
+        adv.device_type = "rogue";
+    else if (is_mobile)
+        adv.device_type = "mobile";
+    else
+        adv.device_type = "static";
     adv.logical_id = -1;
     adv.anomaly    = 0;
     double dx = x - rx, dy = y - ry;
@@ -118,7 +119,6 @@ Advert Device::generateAdvert(double current_time, double rx, double ry) const {
     return adv;
 }
 
-// ─── BeaconSimulator implementation ──────────────────────────────────────────
 BeaconSimulator::BeaconSimulator(int    num_static,
                                  int    num_mobile,
                                  double rogue_percent,
@@ -131,25 +131,22 @@ BeaconSimulator::BeaconSimulator(int    num_static,
       device_serial_(0),
       rng_(std::random_device{}())
 {
-    // Seed initial static and mobile devices
     for (int i = 0; i < num_static; ++i) addStaticDevices(1);
     for (int i = 0; i < num_mobile; ++i) addMobileDevices(1);
-    pending_events_.clear(); // don't fire "added" events before sim starts
+    pending_events_.clear();
 
-    // Schedule rogue injections
     int total          = num_static + num_mobile;
     int num_rogues     = std::max(1, static_cast<int>(total * rogue_percent / 100.0));
     double t_lo        = total_duration_ * 0.05;
     double t_hi        = total_duration_ * 0.95;
     std::uniform_real_distribution<double> t_dist(t_lo, t_hi);
-    static const std::string types[] = {"erratic_timing", "erratic_timing", "erratic_timing"};
+    static const std::string types[] = {"spoof_uid", "erratic_timing", "replay"};
     std::uniform_int_distribution<int> type_pick(0, 2);
     for (int i = 0; i < num_rogues; ++i)
         rogue_schedule_.emplace_back(t_dist(rng_), 300.0, types[type_pick(rng_)]);
     std::sort(rogue_schedule_.begin(), rogue_schedule_.end());
 }
 
-// ─── Device factory helpers ───────────────────────────────────────────────────
 Device BeaconSimulator::makeStaticDevice(const std::string& id) {
     std::uniform_real_distribution<double> px(0.0, width_);
     std::uniform_real_distribution<double> py(0.0, height_);
@@ -192,7 +189,6 @@ void BeaconSimulator::emitEvent(const std::string& event,
     pending_events_.push_back(ev);
 }
 
-// ─── Dynamic add / remove ─────────────────────────────────────────────────────
 int BeaconSimulator::addStaticDevices(int count) {
     for (int i = 0; i < count; ++i) {
         std::string id = "static_" + std::to_string(device_serial_++);
@@ -212,12 +208,11 @@ int BeaconSimulator::addMobileDevices(int count) {
 }
 
 int BeaconSimulator::removeDevices(int count, bool rogue_only) {
-    // Remove from the back to avoid shifting issues; skip static if rogue_only
     int removed = 0;
     for (auto it = devices_.end(); it != devices_.begin() && removed < count; ) {
         --it;
         if (rogue_only && !it->is_rogue) continue;
-        if (!rogue_only && !it->is_rogue && !it->is_mobile) continue; // keep static
+        if (!rogue_only && !it->is_rogue && !it->is_mobile) continue;
         std::string type = it->is_rogue  ? "rogue"
                          : it->is_mobile ? "mobile" : "static";
         emitEvent("removed", it->device_id, type);
@@ -240,7 +235,6 @@ int BeaconSimulator::removeDeviceById(const std::string& id) {
     return 0;
 }
 
-// ─── Queries ──────────────────────────────────────────────────────────────────
 int BeaconSimulator::deviceCount() const {
     return static_cast<int>(devices_.size());
 }
@@ -260,7 +254,6 @@ int BeaconSimulator::rogueCount() const {
     return n;
 }
 
-// ─── Rogue injection helpers ──────────────────────────────────────────────────
 void BeaconSimulator::injectRogue(double current_time,
                                   double duration,
                                   const std::string& type) {
@@ -304,21 +297,18 @@ void BeaconSimulator::removeExpiredRogues(double current_time) {
     }
 }
 
-// ─── Main simulation step ─────────────────────────────────────────────────────
 void BeaconSimulator::step(double dt,
                            std::function<void(const Advert&)>      advert_cb,
                            std::function<void(const DeviceEvent&)> device_cb) {
     if (!isRunning()) return;
     current_time_ += dt;
 
-    // Fire any pending device events first (from add/remove calls between steps)
     for (auto& ev : pending_events_) {
         ev.total_count = static_cast<int>(devices_.size());
         if (device_cb) device_cb(ev);
     }
     pending_events_.clear();
 
-    // Scheduled rogue injections
     for (auto it = rogue_schedule_.begin(); it != rogue_schedule_.end(); ) {
         if (std::get<0>(*it) <= current_time_) {
             injectRogue(current_time_, std::get<1>(*it), std::get<2>(*it));
@@ -326,14 +316,12 @@ void BeaconSimulator::step(double dt,
         } else { ++it; }
     }
 
-    // Fire device events generated by rogue injection
     for (auto& ev : pending_events_) {
         ev.total_count = static_cast<int>(devices_.size());
         if (device_cb) device_cb(ev);
     }
     pending_events_.clear();
 
-    // Expire old rogues
     removeExpiredRogues(current_time_);
     for (auto& ev : pending_events_) {
         ev.total_count = static_cast<int>(devices_.size());
@@ -341,7 +329,6 @@ void BeaconSimulator::step(double dt,
     }
     pending_events_.clear();
 
-    // Update devices and emit adverts
     for (auto& dev : devices_) {
         if (dev.is_mobile)
             dev.updatePosition(dt, width_, height_, rng_);
