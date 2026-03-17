@@ -9,13 +9,15 @@
 #include <sstream>
 #include <algorithm>
 #include <deque>
+#include <cstddef>
+#include <cstdint>
 
 template<typename T>
 static T clamp11(T val, T lo, T hi) {
     return val < lo ? lo : (val > hi ? hi : val);
 }
 
-// ─── Feature vector ───────────────────────────────────────────────────────────
+// --- Feature vector -----------------------------------------------------------
 struct Features {
     double mean_rssi;
     double rssi_std;
@@ -30,7 +32,7 @@ static double cosine_similarity(const Features& a, const Features& b) {
     return dot / (std::sqrt(normA) * std::sqrt(normB));
 }
 
-// ─── Fingerprint ─────────────────────────────────────────────────────────────
+// --- Fingerprint -------------------------------------------------------------
 class Fingerprint {
 public:
     std::string key;
@@ -81,7 +83,7 @@ public:
     }
 };
 
-// ─── SessionManager ───────────────────────────────────────────────────────────
+// --- SessionManager -----------------------------------------------------------
 class SessionManager {
 public:
     SessionManager(double sim_thresh, std::size_t max_cand)
@@ -117,7 +119,7 @@ private:
     int         next_id_;
 };
 
-// ─── Engine ───────────────────────────────────────────────────────────────────
+// --- Engine -------------------------------------------------------------------
 class Engine {
 public:
     explicit Engine(const std::string& cfg) {
@@ -128,19 +130,16 @@ public:
             if (p == std::string::npos) return def;
             try { return std::stod(cfg.substr(p + 1)); } catch (...) { return def; }
         };
-
-        int    num_static    = static_cast<int>(ext("num_static",    10));
-        int    num_mobile    = static_cast<int>(ext("num_mobile",     5));
-        double rogue_pct     = ext("rogue_percent", 10.0);
-        double dur_hrs       = ext("duration_hours", 1.0);
-        double width         = ext("width",  100.0);
-        double height        = ext("height", 100.0);
-        rssi_th_ = ext("rssi_th",  10.0);
-        int_th_  = ext("int_th",    0.1);
-        sim_th_  = ext("sim_th",    0.8);
-
-        sim_ = new BeaconSimulator(num_static, num_mobile, rogue_pct,
-                                   dur_hrs, width, height);
+        int    ns  = static_cast<int>(ext("num_static",     8));
+        int    nm  = static_cast<int>(ext("num_mobile",     4));
+        double rp  = ext("rogue_percent",  10.0);
+        double dur = ext("duration_hours", 999999.0);
+        double w   = ext("width",          500.0);
+        double h   = ext("height",         500.0);
+        rssi_th_   = ext("rssi_th",         10.0);
+        int_th_    = ext("int_th",           0.1);
+        sim_th_    = ext("sim_th",           0.8);
+        sim_     = new BeaconSimulator(ns, nm, rp, dur, w, h);
         learner_ = new ThresholdLearner(rssi_th_, int_th_, sim_th_);
         session_ = new SessionManager(sim_th_, 1000);
     }
@@ -149,8 +148,8 @@ public:
     Engine(const Engine&)            = delete;
     Engine& operator=(const Engine&) = delete;
 
-    void setAdvertCallback (AdvertCallback      cb) { advert_cb_  = cb; }
-    void setDeviceCallback (DeviceEventCallback cb) { device_cb_  = cb; }
+    void setAdvertCallback (AdvertCallback      cb) { advert_cb_ = cb; }
+    void setDeviceCallback (DeviceEventCallback cb) { device_cb_ = cb; }
 
     void setThresholds(double r, double i, double s) {
         rssi_th_ = r; int_th_ = i; sim_th_ = s;
@@ -158,11 +157,15 @@ public:
         learner_->setThresholds(r, i, s);
     }
 
-    // ── Dynamic device management (thin wrappers) ─────────────────────────────
-    int addStaticDevices (int n)              { return sim_->addStaticDevices(n); }
-    int addMobileDevices (int n)              { return sim_->addMobileDevices(n); }
-    int removeDevices    (int n, bool ro)     { return sim_->removeDevices(n, ro); }
+    int addStaticDevices (int n)                 { return sim_->addStaticDevices(n); }
+    int addMobileDevices (int n)                 { return sim_->addMobileDevices(n); }
+    int removeDevices    (int n, bool ro)        { return sim_->removeDevices(n, ro); }
     int removeDeviceById (const std::string& id) { return sim_->removeDeviceById(id); }
+
+    int injectRogueNow(const std::string& type, double duration) {
+        sim_->injectRogue(sim_->currentTime(), duration, type);
+        return sim_->deviceCount();
+    }
 
     int getDeviceCount() const { return sim_->deviceCount(); }
     int getStaticCount() const { return sim_->staticCount(); }
@@ -170,7 +173,6 @@ public:
     int getRogueCount () const { return sim_->rogueCount();  }
 
     int step(double dt) {
-        // Device event callback wrapper
         auto dev_cb = [this](const DeviceEvent& ev) {
             if (device_cb_)
                 device_cb_(ev.event.c_str(),
@@ -193,17 +195,17 @@ public:
     const char* getStats() {
         std::ostringstream o;
         o << "{"
-          << "\"time\":"           << sim_->currentTime()         << ","
-          << "\"device_count\":"   << sim_->deviceCount()         << ","
-          << "\"static_count\":"   << sim_->staticCount()         << ","
-          << "\"mobile_count\":"   << sim_->mobileCount()         << ","
-          << "\"rogue_count\":"    << sim_->rogueCount()          << ","
-          << "\"logical_count\":"  << session_->count()           << ","
+          << "\"time\":"           << sim_->currentTime()           << ","
+          << "\"device_count\":"   << sim_->deviceCount()           << ","
+          << "\"static_count\":"   << sim_->staticCount()           << ","
+          << "\"mobile_count\":"   << sim_->mobileCount()           << ","
+          << "\"rogue_count\":"    << sim_->rogueCount()            << ","
+          << "\"logical_count\":"  << session_->count()             << ","
           << "\"anomaly_rate\":"   << learner_->recentAnomalyRate() << ","
-          << "\"fp_rate\":"        << learner_->recentFPRate()    << ","
-          << "\"fn_rate\":"        << learner_->recentFNRate()    << ","
-          << "\"rssi_th\":"        << learner_->rssiTh()          << ","
-          << "\"int_th\":"         << learner_->intTh()           << ","
+          << "\"fp_rate\":"        << learner_->recentFPRate()      << ","
+          << "\"fn_rate\":"        << learner_->recentFNRate()      << ","
+          << "\"rssi_th\":"        << learner_->rssiTh()            << ","
+          << "\"int_th\":"         << learner_->intTh()             << ","
           << "\"sim_th\":"         << learner_->simTh()
           << "}";
         last_stats_ = o.str();
@@ -244,12 +246,11 @@ private:
                                recent_keys_.begin() + 10000);
     }
 
-    BeaconSimulator*                             sim_      = nullptr;
-    ThresholdLearner*                            learner_  = nullptr;
-    SessionManager*                              session_  = nullptr;
+    BeaconSimulator*                             sim_       = nullptr;
+    ThresholdLearner*                            learner_   = nullptr;
+    SessionManager*                              session_   = nullptr;
     AdvertCallback                               advert_cb_ = nullptr;
     DeviceEventCallback                          device_cb_ = nullptr;
-
     std::unordered_map<std::string, Fingerprint> fingerprints_;
     std::vector<std::string>                     recent_keys_;
 
@@ -258,7 +259,6 @@ private:
     int         step_ctr_ = 0;
 };
 
-// ─── C interface ──────────────────────────────────────────────────────────────
 extern "C" {
 
 EngineHandle create_engine(const char* cfg) {
@@ -305,6 +305,9 @@ const char* get_stats_json(EngineHandle e) {
 }
 void update_thresholds(EngineHandle e, double r, double i, double s) {
     static_cast<Engine*>(e)->setThresholds(r, i, s);
+}
+int inject_rogue_now(EngineHandle e, const char* rogue_type, double duration_sec) {
+    return static_cast<Engine*>(e)->injectRogueNow(rogue_type ? rogue_type : "", duration_sec);
 }
 
 } // extern "C"

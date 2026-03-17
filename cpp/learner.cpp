@@ -1,5 +1,7 @@
 #include "learner.h"
 #include <cmath>
+#include <cstddef>
+#include <deque>
 
 template<typename T>
 static T clamp11(T val, T lo, T hi) {
