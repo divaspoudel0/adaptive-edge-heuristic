@@ -11,6 +11,7 @@
 #include <deque>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 template<typename T>
 static T clamp11(T val, T lo, T hi) {
@@ -232,6 +233,13 @@ private:
 
         learner_->addObservation(adv.is_rogue, anomaly,
                                  adv.rssi, adv.x, adv.y, adv.timestamp);
+        if (adv.is_rogue) {
+    printf("Rogue %s: rssi_std=%.2f, adv_interval=%.3f, anomaly=%d\n",
+           adv.rogue_type.c_str(),
+           it->second.getFeatures().rssi_std,
+           it->second.adv_interval_ema,
+           anomaly);
+}
 
         if (advert_cb_)
             advert_cb_(adv.timestamp,
